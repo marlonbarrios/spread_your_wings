@@ -1,4 +1,4 @@
-// Spread Your Wings — MediaPipe Pose + Face Landmarker: wings, plumage, face shield; eagle eyes on iris mesh (pose fallback).
+// Wingspan — MediaPipe Pose + Face Landmarker: wings, plumage, face shield; eagle eyes on iris mesh (pose fallback).
 // Default 2D canvas (WEBGL broke visibility for line/image-style drawing without extra lighting).
 // I = still reference image, V = webcam (mirrored). Needs local or https server.
 
@@ -2055,7 +2055,7 @@ function drawModeHint() {
   text(`Source: ${src}  ·  I = image  ·  V = video  ·  Space = ${snd}`, 14, height - 14);
   fill(255, 255, 255, 115);
   textSize(11);
-  text("Spread Your Wings — move with me", 14, height - 30);
+  text("Wingspan — move with me", 14, height - 30);
   fill(255, 255, 255, 88);
   textSize(9);
   text("Pose tracks arms and body for the wings.", 14, height - 44);
@@ -2075,7 +2075,7 @@ function draw() {
     fill(255);
     noStroke();
     textAlign(CENTER, CENTER);
-    text("Spread Your Wings\nstarting camera, pose & face…", width / 2, height / 2);
+    text("Wingspan\nstarting camera, pose & face…", width / 2, height / 2);
     return;
   }
 

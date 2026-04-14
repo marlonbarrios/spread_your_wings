@@ -1,6 +1,6 @@
-# Spread Your Wings
+# Wingspan
 
-A browser-based piece built with **p5.js** and **MediaPipe**: your **body pose** drives layered wings and plumage, and **face landmarks** (iris positions) anchor the eagle eyes when a face is visible, with a fallback to pose-based eye estimates.
+**Wingspan** is a browser-based piece built with **p5.js** and **MediaPipe**: your **body pose** drives layered wings and plumage, and **face landmarks** (iris positions) anchor the eagle eyes when a face is visible, with a fallback to pose-based eye estimates.
 
 ## Run it
 
@@ -35,4 +35,4 @@ Models and WASM are fetched from Google’s model bucket and jsDelivr (`@mediapi
 
 ## Repository
 
-Source: [github.com/marlonbarrios/spread_your_wings](https://github.com/marlonbarrios/spread_your_wings)
+**Wingspan** — source: [github.com/marlonbarrios/spread_your_wings](https://github.com/marlonbarrios/spread_your_wings)
