@@ -60,6 +60,14 @@ let smoothSpeedGlow = 0;
 let smoothFaceEagleL = null;
 let smoothFaceEagleR = null;
 
+/** Throttle landmark inference and reuse recent results between frames. */
+const POSE_DETECT_INTERVAL_MS = 33;
+const FACE_DETECT_INTERVAL_MS = 50;
+let lastPoseDetectMs = -Infinity;
+let lastFaceDetectMs = -Infinity;
+let cachedPoseResult = null;
+let cachedFaceResult = null;
+
 function tintPlumageWithSpeed(rgb, glow, warmth) {
   const g = constrain(glow, 0, 1) * warmth;
   return [
@@ -136,8 +144,20 @@ function keyPressed() {
     toggleWingWindSound();
     return false;
   }
-  if (key === "i" || key === "I") inputMode = "image";
-  if (key === "v" || key === "V") inputMode = "video";
+  if (key === "i" || key === "I") {
+    inputMode = "image";
+    cachedPoseResult = null;
+    cachedFaceResult = null;
+    lastPoseDetectMs = -Infinity;
+    lastFaceDetectMs = -Infinity;
+  }
+  if (key === "v" || key === "V") {
+    inputMode = "video";
+    cachedPoseResult = null;
+    cachedFaceResult = null;
+    lastPoseDetectMs = -Infinity;
+    lastFaceDetectMs = -Infinity;
+  }
 }
 
 function makeBrownNoiseBuffer(ctx, seconds = 2.5) {
@@ -277,6 +297,8 @@ function updateWingWindSound(motion) {
 }
 
 function setup() {
+  // Retina displays can double/triple fragment work; cap to improve FPS.
+  pixelDensity(1);
   createCanvas(windowWidth, windowHeight);
 
   capture = createCapture(VIDEO);
@@ -911,7 +933,7 @@ function buildSideWingFeathers(lm, isLeft, globalDrive, wingReact, plumage) {
   openSide *= lerp(0.9, 1.12, eEase);
 
   const refBoost = inputMode === "image" ? 1.06 : 1;
-  const nMain = 24;
+  const nMain = 18;
   const list = [];
 
   for (let i = 0; i < nMain; i++) {
@@ -958,8 +980,8 @@ function buildSideWingFeathers(lm, isLeft, globalDrive, wingReact, plumage) {
     });
   }
 
-  for (let j = 0; j < 14; j++) {
-    const u = (j + 0.5) / 14;
+  for (let j = 0; j < 10; j++) {
+    const u = (j + 0.5) / 10;
     const along = (j - 6.5) * sw * 0.036 * TOP_WING_SPAN_SCALE * spanMul;
     const bx = root.x + tang.x * along + inVec.x * sw * 0.024;
     const by = root.y + tang.y * along - sw * 0.055;
@@ -1053,8 +1075,8 @@ function collectChestFeathers(lm, motion) {
   const reactMir = mirroredHorizontalReact(react);
   const mx = mirrorAxisX(lm);
   const list = [];
-  const colsHalf = 7;
-  const rows = 7;
+  const colsHalf = 6;
+  const rows = 6;
   for (let row = 0; row < rows; row++) {
     const v = row / (rows - 0.65);
     if (v > 0.92) continue;
@@ -1409,8 +1431,8 @@ function featherIntersectsFaceShield(f, bounds) {
   const wMax =
     L * wBase * vaneWidthForKind(kind) * (0.86 + 0.14 * sin(f.phase)) * (1 + spd * 0.17);
 
-  for (let i = 0; i <= 12; i++) {
-    const t = i / 12;
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8;
     const sx = bezierPoint(f.bx, midx1, midx2, tx, t);
     const sy = bezierPoint(f.by, midy1, midy2, ty, t);
     const wbarb = wMax * sin(t * PI) * (0.38 + 0.62 * t) * 1.1;
@@ -1464,7 +1486,7 @@ function drawFeatherPlume(bx, by, dirx, diry, L, phase, alpha, react, kind, pass
   const innerLip = wingish ? 0.88 : k === "hand" ? 0.82 : 0.76;
 
   if (pass === "fill") {
-    const steps = 18;
+    const steps = 12;
     noStroke();
     const faceA = wingish ? 0.62 : k === "hand" ? 0.6 : 0.58;
     fill(faceRgb[0], faceRgb[1], faceRgb[2], alpha * faceA * aBoost);
@@ -1529,7 +1551,7 @@ function drawFeatherPlume(bx, by, dirx, diry, L, phase, alpha, react, kind, pass
   strokeWeight(max(0.65, rW * 0.2));
   bezier(bx, by, midx1, midy1, midx2, midy2, tx, ty);
 
-  const steps = 14;
+  const steps = 10;
   const barbTipStart = k === "wingPrimary" ? 0.62 : k === "wing" ? 0.64 : 0.72;
   const tipFlare =
     k === "wingPrimary" ? 0.72 : k === "wing" ? 0.62 : k === "covert" ? 0.5 : 0.55;
@@ -1616,11 +1638,13 @@ function drawFeatherPlume(bx, by, dirx, diry, L, phase, alpha, react, kind, pass
 function drawFeatherList(feathers, faceBounds, speedGlow) {
   const sg = speedGlow === undefined ? 0 : speedGlow;
   if (feathers.length === 0) return;
+  const drawable =
+    faceBounds ? feathers.filter((f) => !featherIntersectsFaceShield(f, faceBounds)) : feathers;
+  if (drawable.length === 0) return;
 
   push();
   blendMode(BLEND);
-  for (const f of feathers) {
-    if (faceBounds && featherIntersectsFaceShield(f, faceBounds)) continue;
+  for (const f of drawable) {
     const kind = f.kind || "body";
     drawFeatherPlume(
       f.bx,
@@ -1641,8 +1665,7 @@ function drawFeatherList(feathers, faceBounds, speedGlow) {
 
   push();
   blendMode(BLEND);
-  for (const f of feathers) {
-    if (faceBounds && featherIntersectsFaceShield(f, faceBounds)) continue;
+  for (const f of drawable) {
     const kind = f.kind || "body";
     drawFeatherPlume(
       f.bx,
@@ -2006,9 +2029,30 @@ function draw() {
   drawInputCover();
 
   const now = performance.now();
-  const faceResult = faceLandmarker ? faceLandmarker.detectForVideo(poseSourceElt(), now) : null;
-  const result = poseLandmarker.detectForVideo(poseSourceElt(), now);
-  const lm = result.landmarks && result.landmarks[0];
+  const source = poseSourceElt();
+
+  const shouldRunPose =
+    inputMode === "image"
+      ? !cachedPoseResult
+      : now - lastPoseDetectMs >= POSE_DETECT_INTERVAL_MS;
+  if (shouldRunPose) {
+    cachedPoseResult = poseLandmarker.detectForVideo(source, now);
+    lastPoseDetectMs = now;
+  }
+
+  const shouldRunFace =
+    faceLandmarker &&
+    (inputMode === "image"
+      ? !cachedFaceResult
+      : now - lastFaceDetectMs >= FACE_DETECT_INTERVAL_MS);
+  if (shouldRunFace) {
+    cachedFaceResult = faceLandmarker.detectForVideo(source, now);
+    lastFaceDetectMs = now;
+  }
+
+  const faceResult = cachedFaceResult;
+  const result = cachedPoseResult;
+  const lm = result && result.landmarks && result.landmarks[0];
   let motionForSound = SILENT_ARM_MOTION;
   if (lm) {
     const motion = smoothMotionBundle(armMotionBundle(lm));
