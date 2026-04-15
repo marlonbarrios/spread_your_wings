@@ -56,16 +56,9 @@ const SILENT_ARM_MOTION = {
 /** Smoothed 0–1 from arm speed: tints plumage + drives sparks. */
 let smoothSpeedGlow = 0;
 
-/** Smoothed “cold air” overlay strength (same energy as wing-wind sound). */
-let smoothColdAir = 0;
-
 /** Smoothed screen slots { x, y, span } from face mesh (iris-accurate). */
 let smoothFaceEagleL = null;
 let smoothFaceEagleR = null;
-
-/** Screen-space spark particles (ADD blend). */
-let armSparks = [];
-const MAX_ARM_SPARKS = 130;
 
 function tintPlumageWithSpeed(rgb, glow, warmth) {
   const g = constrain(glow, 0, 1) * warmth;
@@ -74,68 +67,6 @@ function tintPlumageWithSpeed(rgb, glow, warmth) {
     min(255, rgb[1] + g * 58 + g * g * 42),
     min(255, rgb[2] + g * 34 + g * g * 62),
   ];
-}
-
-function updateArmSparks(lm, motion) {
-  for (let i = armSparks.length - 1; i >= 0; i--) {
-    const s = armSparks[i];
-    s.x += s.vx;
-    s.y += s.vy;
-    s.vy += 0.31;
-    s.vx *= 0.965;
-    s.life -= 1;
-    if (s.life <= 0) armSparks.splice(i, 1);
-  }
-  if (!lm || !motion) return;
-
-  function spawnLandmark(idx, drive, react) {
-    if (drive < 0.11 || !visibleEnough(lm[idx], 0.1)) return;
-    const burst = drive * drive;
-    if (random() > 0.18 + burst * 0.72) return;
-    const p = project(lm[idx]);
-    const rvx = react ? react.vx * 0.035 : 0;
-    const rvy = react ? react.vy * 0.035 : 0;
-    const n = min(4, 1 + floor(drive * 3.5 + random() * 2.2));
-    for (let k = 0; k < n && armSparks.length < MAX_ARM_SPARKS; k++) {
-      const life0 = 14 + random(26) * (0.45 + drive * 0.55);
-      armSparks.push({
-        x: p.x + random(-12, 12),
-        y: p.y + random(-12, 12),
-        vx: rvx + (random() - 0.5) * (5 + drive * 18),
-        vy: rvy + (random() - 0.5) * (5 + drive * 18),
-        life: life0,
-        maxLife: life0,
-        w: 1.8 + random(2.4) + drive * 2.8,
-      });
-    }
-  }
-
-  const dL = constrain(motion.left.speed * 0.028, 0, 1.45);
-  const dR = constrain(motion.right.speed * 0.028, 0, 1.45);
-  spawnLandmark(15, dL, motion.left);
-  spawnLandmark(16, dR, motion.right);
-  spawnLandmark(13, dL * 0.72, motion.left);
-  spawnLandmark(14, dR * 0.72, motion.right);
-
-  if (armSparks.length > MAX_ARM_SPARKS) {
-    armSparks.splice(0, armSparks.length - MAX_ARM_SPARKS);
-  }
-}
-
-function drawArmSparks() {
-  if (armSparks.length === 0) return;
-  push();
-  blendMode(ADD);
-  noStroke();
-  for (const s of armSparks) {
-    const f = s.life / s.maxLife;
-    const a = 255 * f * f;
-    fill(255, 248, 200, a * 0.78);
-    circle(s.x, s.y, s.w);
-    fill(255, 255, 255, a * 0.42);
-    circle(s.x - s.vx * 0.35, s.y - s.vy * 0.35, s.w * 0.4);
-  }
-  pop();
 }
 
 const MODEL_URI =
@@ -1764,13 +1695,6 @@ function drawSkeletonBody(landmarks) {
   for (const [i, j] of ARMS_LEFT) drawSegment(landmarks, i, j);
   for (const [i, j] of ARMS_RIGHT) drawSegment(landmarks, i, j);
 
-  const nose = landmarks[0];
-  if (visibleEnough(nose, 0.2)) {
-    const p = project(nose);
-    noStroke();
-    fill(255, 252, 245, inputMode === "image" ? 90 : 70);
-    circle(p.x, p.y, 12);
-  }
   pop();
 }
 
@@ -2093,17 +2017,13 @@ function draw() {
     const rawGlow = constrain(pow(peak * 0.034, 0.72), 0, 1);
     const kGlow = rawGlow > smoothSpeedGlow ? 0.32 : 0.14;
     smoothSpeedGlow = lerp(smoothSpeedGlow, rawGlow, kGlow);
-    updateColdAirMotion(motion);
-    updateArmSparks(lm, motion);
     const faceBounds = computeFaceShieldBounds(lm);
     const plumage = updateSmoothedPlumageSides(lm, motion);
     updateSmoothHandSpread(lm);
     drawBackWings(lm, motion, faceBounds, plumage, min(1, smoothSpeedGlow * 1.28));
     drawBodyFeathers(lm, motion, faceBounds, plumage, smoothSpeedGlow);
-    drawColdAirOverlay(lm);
     drawHandFingerRings(lm);
     drawSkeletonBody(lm);
-    drawArmSparks();
     drawHandsForeground(lm);
     prevProj = snapshotProj(lm);
   } else {
@@ -2119,10 +2039,7 @@ function draw() {
     smoothWingPlumage.expand = lerp(smoothWingPlumage.expand, 0.55, 0.07);
     smoothWingPlumage.rest = lerp(smoothWingPlumage.rest, 0.45, 0.07);
     smoothSpeedGlow = lerp(smoothSpeedGlow, 0, 0.07);
-    updateColdAirMotion(null);
     updateSmoothHandSpread(null);
-    updateArmSparks(null, null);
-    drawArmSparks();
   }
 
   drawEagleEyes(lm, faceResult);
@@ -2131,79 +2048,3 @@ function draw() {
   drawModeHint();
 }
 
-/** Match wing-wind drive: faster / wider arm motion → stronger cool mist. */
-function updateColdAirMotion(motion) {
-  if (!motion) {
-    smoothColdAir = lerp(smoothColdAir, 0, 0.085);
-    return;
-  }
-  const left = motion.left.speed;
-  const right = motion.right.speed;
-  const raw = (left + right) * 0.5 + Math.abs(left - right) * 0.22;
-  const drive = constrain(raw * 0.031, 0, 1.35);
-  const target = pow(drive, 0.8);
-  const k = target > smoothColdAir ? 0.24 : 0.1;
-  smoothColdAir = lerp(smoothColdAir, target, k);
-}
-
-/**
- * Icy breeze overlay: soft cyan SCREEN wisps + light frost at frame edges + haze at wrists.
- */
-function drawColdAirOverlay(lm) {
-  if (smoothColdAir < 0.012) return;
-  const ca = smoothColdAir;
-  const t = frameCount * 0.017;
-  const sw = lm ? shoulderWidthPx(lm) : 120;
-
-  push();
-  blendMode(SCREEN);
-  noStroke();
-
-  const corners = [
-    [0, 0],
-    [width, 0],
-    [0, height],
-    [width, height],
-  ];
-  for (let c = 0; c < 4; c++) {
-    const [cx, cy] = corners[c];
-    fill(150, 210, 255, ca * 26);
-    ellipse(cx, cy, max(width, height) * 0.72, max(width, height) * 0.72);
-  }
-
-  fill(220, 245, 255, ca * 14);
-  rect(0, 0, width, height * 0.06);
-  rect(0, height * 0.94, width, height * 0.06);
-
-  for (let i = 0; i < 16; i++) {
-    const ph = t + i * 0.69;
-    const y = height * (0.06 + (i / 16) * 0.88) + sin(ph * 1.1) * 32 * ca;
-    const drift = frameCount * (1.0 + ca * 2.4) + i * 83;
-    const x = ((drift * 1.7 + sin(ph) * 80) % (width + 280)) - 140;
-    push();
-    translate(x, y);
-    rotate(sin(ph * 0.45) * 0.22);
-    fill(130 + (i % 5) * 8, 218 + (i % 3) * 6, 255, ca * (16 + (i % 4) * 1.2));
-    ellipse(0, 0, 200 + ca * 140, 36 + ca * 48);
-    fill(240, 252, 255, ca * 10);
-    ellipse(-25, 0, 90 + ca * 40, 14 + ca * 12);
-    pop();
-  }
-
-  if (lm) {
-    for (const wr of [15, 16]) {
-      if (!visibleEnough(lm[wr], 0.12)) continue;
-      const p = project(lm[wr]);
-      const r = sw * (0.38 + ca * 0.22);
-      for (let k = 0; k < 6; k++) {
-        const ph = t * 1.2 + k * 1.05;
-        const ox = sin(ph) * r * 0.35;
-        const oy = cos(ph * 0.88) * r * 0.28;
-        fill(185, 235, 255, ca * (22 - k * 2.2));
-        ellipse(p.x + ox, p.y + oy, r * (1.05 - k * 0.07), r * (0.42 - k * 0.035));
-      }
-    }
-  }
-
-  pop();
-}
