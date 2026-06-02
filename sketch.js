@@ -33,19 +33,51 @@ let smoothMotionReact = {
   both: { vx: 0, vy: 0, speed: 0 },
 };
 
-/** Space toggles wind / wing-flap ambience (Web Audio). */
+/** Space toggles wind; arms-as-wings auto-start wind after audio unlock (unless Space turned off). */
 let wingWind = {
   enabled: false,
+  manualOff: false,
   ctx: null,
   src: null,
   gain: null,
   hp: null,
   lp: null,
+  gustSrc: null,
+  gustHp: null,
+  gustLp: null,
+  gustGain: null,
+  panner: null,
   graphReady: false,
   env: 0,
   prevDrive: 0,
+  smoothPan: 0,
   /** Smoothed 0 = start of day (low, dark wind) → 1 = end of day (brighter, higher). */
   smoothDayPitch: 0,
+};
+
+let audioUnlocked = false;
+
+/** O toggles operatic voice (formant synth), driven by arms + wing spread. */
+let operaticVoice = {
+  enabled: false,
+  graphReady: false,
+  fund: null,
+  overtone: null,
+  harmGain: null,
+  vibratoOsc: null,
+  vibratoGain: null,
+  formants: null,
+  panner: null,
+  masterGain: null,
+  env: 0,
+  prevDrive: 0,
+  smoothHz: 196,
+  /** 0–1 mix level for ducking wind when voice sings. */
+  smoothMix: 0,
+  /** 0–1 smoothed: hands together → voice silent. */
+  smoothTouch: 0,
+  /** 0 = hands low, 1 = hands high → pitch. */
+  smoothHandHeight: 0.5,
 };
 
 const SILENT_ARM_MOTION = {
@@ -55,6 +87,8 @@ const SILENT_ARM_MOTION = {
 
 /** Smoothed 0–1 from arm speed: tints plumage + drives sparks. */
 let smoothSpeedGlow = 0;
+/** Smoothed pulse for feed portal frame (motion + idle breathe). */
+let smoothFeedAura = 0.12;
 
 /** Smoothed screen slots { x, y, span } from face mesh (iris-accurate). */
 let smoothFaceEagleL = null;
@@ -122,6 +156,8 @@ const HANDS_RIGHT = [
 /** BlazePose: L 17 pinky, 19 index, 21 thumb · R 18, 20, 22 */
 const HAND_LEFT_TIPS = [17, 19, 21];
 const HAND_RIGHT_TIPS = [18, 20, 22];
+const HAND_LEFT_POINTS = [15, 17, 19, 21];
+const HAND_RIGHT_POINTS = [16, 18, 20, 22];
 
 /** Smoothed 0–1+ finger splay per hand. */
 let smoothHandSpread = { left: 0.35, right: 0.35 };
@@ -139,7 +175,19 @@ function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
 
+function unlockAudio() {
+  if (audioUnlocked) return;
+  const ctx = ensureSharedAudioContext();
+  if (ctx && ctx.state === "suspended") ctx.resume();
+  audioUnlocked = true;
+}
+
+function mousePressed() {
+  unlockAudio();
+}
+
 function keyPressed() {
+  unlockAudio();
   if (key === " " || key === "Spacebar" || keyCode === 32) {
     toggleWingWindSound();
     return false;
@@ -158,6 +206,16 @@ function keyPressed() {
     lastPoseDetectMs = -Infinity;
     lastFaceDetectMs = -Infinity;
   }
+  if (key === "o" || key === "O") {
+    toggleOperaticVoiceSound();
+  }
+}
+
+function ensureSharedAudioContext() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!wingWind.ctx) wingWind.ctx = new AC();
+  return wingWind.ctx;
 }
 
 function makeBrownNoiseBuffer(ctx, seconds = 2.5) {
@@ -174,43 +232,122 @@ function makeBrownNoiseBuffer(ctx, seconds = 2.5) {
   return buf;
 }
 
+function makeWhiteNoiseBuffer(ctx, seconds = 1.4) {
+  const rate = ctx.sampleRate;
+  const n = Math.floor(rate * seconds);
+  const buf = ctx.createBuffer(1, n, rate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) data[i] = Math.random() * 2 - 1;
+  return buf;
+}
+
 function ensureWingWindGraph() {
   if (wingWind.graphReady) return;
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC) return;
-  wingWind.ctx = new AC();
-  const ctx = wingWind.ctx;
-  const noiseBuf = makeBrownNoiseBuffer(ctx);
-  const src = ctx.createBufferSource();
-  src.buffer = noiseBuf;
-  src.loop = true;
+  const ctx = ensureSharedAudioContext();
+  if (!ctx) return;
+
+  const bodySrc = ctx.createBufferSource();
+  bodySrc.buffer = makeBrownNoiseBuffer(ctx);
+  bodySrc.loop = true;
+
   const hp = ctx.createBiquadFilter();
   hp.type = "highpass";
-  hp.frequency.value = 200;
-  hp.Q.value = 0.65;
+  hp.frequency.value = 180;
+  hp.Q.value = 0.62;
+
   const lp = ctx.createBiquadFilter();
   lp.type = "lowpass";
   lp.frequency.value = 1400;
   lp.Q.value = 0.82;
+
   const gain = ctx.createGain();
   gain.gain.value = 0;
+
+  const gustSrc = ctx.createBufferSource();
+  gustSrc.buffer = makeWhiteNoiseBuffer(ctx);
+  gustSrc.loop = true;
+
+  const gustHp = ctx.createBiquadFilter();
+  gustHp.type = "highpass";
+  gustHp.frequency.value = 420;
+  gustHp.Q.value = 0.55;
+
+  const gustLp = ctx.createBiquadFilter();
+  gustLp.type = "lowpass";
+  gustLp.frequency.value = 5200;
+  gustLp.Q.value = 0.7;
+
+  const gustGain = ctx.createGain();
+  gustGain.gain.value = 0;
+
+  const panner = ctx.createStereoPanner();
+  panner.pan.value = 0;
+
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -32;
   comp.knee.value = 24;
   comp.ratio.value = 3.2;
   comp.attack.value = 0.004;
   comp.release.value = 0.28;
-  src.connect(hp);
+
+  bodySrc.connect(hp);
   hp.connect(lp);
   lp.connect(gain);
-  gain.connect(comp);
+  gain.connect(panner);
+
+  gustSrc.connect(gustHp);
+  gustHp.connect(gustLp);
+  gustLp.connect(gustGain);
+  gustGain.connect(panner);
+
+  panner.connect(comp);
   comp.connect(ctx.destination);
-  src.start(0);
-  wingWind.src = src;
+
+  bodySrc.start(0);
+  gustSrc.start(0);
+
+  wingWind.src = bodySrc;
   wingWind.gain = gain;
   wingWind.hp = hp;
   wingWind.lp = lp;
+  wingWind.gustSrc = gustSrc;
+  wingWind.gustHp = gustHp;
+  wingWind.gustLp = gustLp;
+  wingWind.gustGain = gustGain;
+  wingWind.panner = panner;
   wingWind.graphReady = true;
+}
+
+function ensureWingWindEnabled() {
+  if (!ensureSharedAudioContext()) return false;
+  ensureWingWindGraph();
+  if (!wingWind.graphReady) return false;
+  if (!wingWind.enabled) {
+    wingWind.enabled = true;
+    wingWind.smoothDayPitch = clockDayPitchPhase();
+  }
+  if (wingWind.ctx.state === "suspended") wingWind.ctx.resume();
+  return true;
+}
+
+/** No pose: gentle ambient wind only (after audio unlock). */
+function maybeAutoEnableSoftWind() {
+  if (!audioUnlocked || wingWind.manualOff) return;
+  ensureWingWindEnabled();
+}
+
+/** Body visible: start wind when arms move (after click/key unlock). */
+function maybeAutoEnableWingWind(motion, pose) {
+  if (!audioUnlocked || wingWind.manualOff) return;
+
+  const left = motion?.left?.speed ?? 0;
+  const right = motion?.right?.speed ?? 0;
+  const wingExp = pose?.wingExpand ?? 0.55;
+  const open = constrain((wingExp - 0.28) / 0.82, 0, 1);
+  const move = max(max(left, right), 0) * 0.038 + open * 0.12;
+  if (move < 0.04) return;
+
+  ensureWingWindEnabled();
 }
 
 /**
@@ -227,17 +364,249 @@ function clockDayPitchPhase() {
   return (h - dayStart) / (dayEnd - dayStart);
 }
 
+function toggleOperaticVoiceSound() {
+  operaticVoice.enabled = !operaticVoice.enabled;
+  if (operaticVoice.enabled) {
+    if (!ensureSharedAudioContext()) {
+      operaticVoice.enabled = false;
+      return;
+    }
+    ensureOperaticVoiceGraph();
+    if (!operaticVoice.graphReady) {
+      operaticVoice.enabled = false;
+      return;
+    }
+    if (wingWind.ctx && wingWind.ctx.state === "suspended") wingWind.ctx.resume();
+    operaticVoice.smoothHz = 196;
+  } else if (operaticVoice.masterGain && wingWind.ctx) {
+    const t = wingWind.ctx.currentTime;
+    operaticVoice.masterGain.gain.cancelScheduledValues(t);
+    operaticVoice.masterGain.gain.setValueAtTime(operaticVoice.masterGain.gain.value, t);
+    operaticVoice.masterGain.gain.setTargetAtTime(0, t, 0.04);
+    operaticVoice.env = 0;
+    operaticVoice.prevDrive = 0;
+    operaticVoice.smoothMix = 0;
+    operaticVoice.smoothTouch = 0;
+    operaticVoice.smoothHandHeight = 0.5;
+  }
+}
+
+function makeOperaticFormant(ctx, freq, q, level) {
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.frequency.value = freq;
+  bp.Q.value = q;
+  const g = ctx.createGain();
+  g.gain.value = level;
+  bp.connect(g);
+  return { bp, g };
+}
+
+function ensureOperaticVoiceGraph() {
+  if (operaticVoice.graphReady) return;
+  const ctx = ensureSharedAudioContext();
+  if (!ctx) return;
+
+  const fund = ctx.createOscillator();
+  fund.type = "sawtooth";
+  fund.frequency.value = 196;
+
+  const overtone = ctx.createOscillator();
+  overtone.type = "triangle";
+  overtone.frequency.value = 392;
+  const harmGain = ctx.createGain();
+  harmGain.gain.value = 0.32;
+
+  const vibratoOsc = ctx.createOscillator();
+  vibratoOsc.type = "sine";
+  vibratoOsc.frequency.value = 5.6;
+  const vibratoGain = ctx.createGain();
+  vibratoGain.gain.value = 4;
+
+  const bodyGain = ctx.createGain();
+  bodyGain.gain.value = 0.64;
+
+  const f1 = makeOperaticFormant(ctx, 740, 11, 1);
+  const f2 = makeOperaticFormant(ctx, 1160, 9, 0.82);
+  const f3 = makeOperaticFormant(ctx, 2820, 7.5, 0.42);
+
+  const mix = ctx.createGain();
+  mix.gain.value = 1;
+
+  fund.connect(bodyGain);
+  overtone.connect(harmGain);
+  harmGain.connect(bodyGain);
+
+  vibratoOsc.connect(vibratoGain);
+  vibratoGain.connect(fund.frequency);
+  const vibHarm = ctx.createGain();
+  vibHarm.gain.value = 0.55;
+  vibratoOsc.connect(vibHarm);
+  vibHarm.connect(overtone.frequency);
+
+  bodyGain.connect(f1.bp);
+  bodyGain.connect(f2.bp);
+  bodyGain.connect(f3.bp);
+  f1.g.connect(mix);
+  f2.g.connect(mix);
+  f3.g.connect(mix);
+
+  const panner = ctx.createStereoPanner();
+  panner.pan.value = 0;
+
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0;
+
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -30;
+  comp.knee.value = 18;
+  comp.ratio.value = 2.6;
+  comp.attack.value = 0.018;
+  comp.release.value = 0.42;
+
+  mix.connect(panner);
+  panner.connect(masterGain);
+  masterGain.connect(comp);
+  comp.connect(ctx.destination);
+
+  fund.start(0);
+  overtone.start(0);
+  vibratoOsc.start(0);
+
+  operaticVoice.fund = fund;
+  operaticVoice.overtone = overtone;
+  operaticVoice.harmGain = harmGain;
+  operaticVoice.vibratoOsc = vibratoOsc;
+  operaticVoice.vibratoGain = vibratoGain;
+  operaticVoice.formants = [f1, f2, f3];
+  operaticVoice.panner = panner;
+  operaticVoice.masterGain = masterGain;
+  operaticVoice.graphReady = true;
+}
+
+/**
+ * Wing spread → pitch & vibrato; arm speed → level, brightness, stereo; flaps → swells.
+ */
+function updateOperaticVoiceSound(motion, pose, hasBody) {
+  if (
+    !operaticVoice.enabled ||
+    !operaticVoice.graphReady ||
+    !wingWind.ctx ||
+    !operaticVoice.masterGain ||
+    !operaticVoice.fund
+  )
+    return;
+  if (wingWind.ctx.state === "suspended") wingWind.ctx.resume();
+
+  if (!hasBody) {
+    const t = wingWind.ctx.currentTime;
+    operaticVoice.smoothMix = lerp(operaticVoice.smoothMix, 0, 0.14);
+    operaticVoice.env = lerp(operaticVoice.env, 0, 0.1);
+    operaticVoice.masterGain.gain.setTargetAtTime(0, t, 0.05);
+    return;
+  }
+
+  const wingExp = pose?.wingExpand ?? 0.55;
+  const wingRest = pose?.wingRest ?? 0.45;
+  const leftExp = pose?.leftExpand ?? 0.55;
+  const rightExp = pose?.rightExpand ?? 0.55;
+  const wingSpd = pose?.wingSpeed ?? 0;
+  const touchTarget = pose?.handsTouching ? 1 : 0;
+  const kTouchUp = 0.24;
+  const kTouchDn = 0.09;
+  operaticVoice.smoothTouch = lerp(
+    operaticVoice.smoothTouch,
+    touchTarget,
+    touchTarget > operaticVoice.smoothTouch ? kTouchUp : kTouchDn
+  );
+  const voiceGate = 1 - pow(constrain(operaticVoice.smoothTouch, 0, 1), 0.82);
+
+  const left = motion?.left?.speed ?? 0;
+  const right = motion?.right?.speed ?? 0;
+  const raw =
+    (left + right) * 0.5 + Math.abs(left - right) * 0.3 + wingSpd * 0.02;
+  const drive = constrain(raw * 0.033, 0, 1.45);
+
+  const kUp = 0.22;
+  const kDn = 0.048;
+  operaticVoice.env +=
+    (drive - operaticVoice.env) * (drive > operaticVoice.env ? kUp : kDn);
+
+  const delta = max(0, drive - operaticVoice.prevDrive);
+  operaticVoice.prevDrive = lerp(operaticVoice.prevDrive, drive, 0.2);
+  const flap = min(1, delta * 3.5);
+
+  const open = constrain((wingExp - 0.22) / 0.88, 0, 1);
+  const lift = constrain(1 - wingRest * 0.92, 0, 1);
+  const aria = constrain(open * 0.7 + lift * 0.42, 0, 1);
+
+  let handHTarget = pose?.handHeight;
+  if (handHTarget === undefined || handHTarget === null) {
+    handHTarget = operaticVoice.smoothHandHeight;
+  }
+  const handHPrev = operaticVoice.smoothHandHeight;
+  operaticVoice.smoothHandHeight = lerp(handHPrev, handHTarget, 0.12);
+  const handH = operaticVoice.smoothHandHeight;
+
+  const armTilt = constrain((leftExp - rightExp) * 2.2, -4, 4);
+  const midi =
+    lerp(44, 82, pow(handH, 0.78)) + armTilt + drive * 1.4 + (aria - 0.5) * 2;
+  const hz = 440 * Math.pow(2, (midi - 69) / 12);
+
+  const kPitch =
+    drive > 0.04 || abs(handHTarget - handHPrev) > 0.018 ? 0.14 : 0.07;
+  operaticVoice.smoothHz = lerp(operaticVoice.smoothHz, hz, kPitch);
+
+  const t = wingWind.ctx.currentTime;
+  operaticVoice.fund.frequency.setTargetAtTime(operaticVoice.smoothHz, t, 0.06);
+  operaticVoice.overtone.frequency.setTargetAtTime(operaticVoice.smoothHz * 2, t, 0.06);
+
+  if (operaticVoice.vibratoGain) {
+    const vibDepth = lerp(2.5, 16, pow(open, 0.75));
+    operaticVoice.vibratoGain.gain.setTargetAtTime(vibDepth, t, 0.09);
+  }
+  if (operaticVoice.vibratoOsc) {
+    operaticVoice.vibratoOsc.frequency.setTargetAtTime(lerp(4.4, 7.4, drive), t, 0.1);
+  }
+
+  const bright = constrain(aria * 0.55 + drive * 0.65 + flap * 0.35, 0, 1);
+  const fm = operaticVoice.formants;
+  if (fm) {
+    fm[0].bp.frequency.setTargetAtTime(lerp(680, 920, bright), t, 0.07);
+    fm[1].bp.frequency.setTargetAtTime(lerp(1080, 1480, bright), t, 0.07);
+    fm[2].bp.frequency.setTargetAtTime(lerp(2550, 3350, bright), t, 0.08);
+    fm[0].bp.Q.setTargetAtTime(lerp(9, 13, bright), t, 0.1);
+  }
+
+  const sustain = aria * 0.42;
+  const level = constrain(
+    (operaticVoice.env * 0.68 + sustain + flap * 0.5) * voiceGate,
+    0,
+    1
+  );
+  operaticVoice.smoothMix = lerp(operaticVoice.smoothMix, level, 0.11);
+  operaticVoice.masterGain.gain.setTargetAtTime(level * 0.44, t, 0.045);
+
+  if (operaticVoice.panner) {
+    const peak = max(max(left, right), 1);
+    const pan = constrain(((left - right) / peak) * 0.55, -0.72, 0.72);
+    operaticVoice.panner.pan.setTargetAtTime(pan, t, 0.07);
+  }
+}
+
 function toggleWingWindSound() {
   wingWind.enabled = !wingWind.enabled;
+  wingWind.manualOff = !wingWind.enabled;
   if (wingWind.enabled) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) {
+    if (!ensureSharedAudioContext()) {
       wingWind.enabled = false;
+      wingWind.manualOff = true;
       return;
     }
     ensureWingWindGraph();
     if (!wingWind.graphReady) {
       wingWind.enabled = false;
+      wingWind.manualOff = true;
       return;
     }
     if (wingWind.ctx && wingWind.ctx.state === "suspended") wingWind.ctx.resume();
@@ -247,16 +616,21 @@ function toggleWingWindSound() {
     wingWind.gain.gain.cancelScheduledValues(t);
     wingWind.gain.gain.setValueAtTime(wingWind.gain.gain.value, t);
     wingWind.gain.gain.setTargetAtTime(0, t, 0.035);
+    if (wingWind.gustGain) {
+      wingWind.gustGain.gain.cancelScheduledValues(t);
+      wingWind.gustGain.gain.setValueAtTime(wingWind.gustGain.gain.value, t);
+      wingWind.gustGain.gain.setTargetAtTime(0, t, 0.03);
+    }
     wingWind.env = 0;
     wingWind.prevDrive = 0;
   }
 }
 
 /**
- * Arm speed → filtered noise (breeze); spikes on acceleration read as flaps.
- * Time of day slowly raises spectral “pitch” (brighter highs) from morning to evening.
+ * No body: soft ambient wind only. With pose: arms-as-wings rustle + gusts.
+ * Time of day slowly brightens the wind from morning to evening.
  */
-function updateWingWindSound(motion) {
+function updateWingWindSound(motion, pose, hasBody) {
   if (!wingWind.enabled || !wingWind.graphReady || !wingWind.ctx || !wingWind.gain || !wingWind.lp)
     return;
   if (wingWind.ctx.state === "suspended") wingWind.ctx.resume();
@@ -265,34 +639,83 @@ function updateWingWindSound(motion) {
   wingWind.smoothDayPitch = lerp(wingWind.smoothDayPitch, dayTarget, 0.012);
   const day = constrain(wingWind.smoothDayPitch, 0, 1);
   const dayEase = pow(day, 0.82);
+  const t = wingWind.ctx.currentTime;
+
+  if (!hasBody) {
+    wingWind.env = lerp(wingWind.env, 0.2, 0.035);
+    wingWind.prevDrive = lerp(wingWind.prevDrive, 0, 0.08);
+    const breathe = 1 + sin(frameCount * 0.007) * 0.14;
+    const soft = wingWind.env * breathe;
+    wingWind.gain.gain.setTargetAtTime(soft * 0.072, t, 0.1);
+    wingWind.lp.frequency.setTargetAtTime(lerp(260, 780, dayEase), t, 0.12);
+    if (wingWind.hp) {
+      wingWind.hp.frequency.setTargetAtTime(lerp(42, 120, dayEase), t, 0.12);
+      wingWind.hp.Q.value = 0.48;
+    }
+    if (wingWind.gustGain) {
+      wingWind.gustGain.gain.setTargetAtTime(0, t, 0.06);
+    }
+    if (wingWind.panner) {
+      const drift = sin(frameCount * 0.004) * 0.18;
+      wingWind.smoothPan = lerp(wingWind.smoothPan, drift, 0.04);
+      wingWind.panner.pan.setTargetAtTime(wingWind.smoothPan, t, 0.1);
+    }
+    return;
+  }
+
+  const wingExp = pose?.wingExpand ?? 0.55;
+  const wingSpd = pose?.wingSpeed ?? 0;
+  const open = constrain((wingExp - 0.22) / 0.88, 0, 1);
 
   const left = motion?.left?.speed ?? 0;
   const right = motion?.right?.speed ?? 0;
-  const raw = (left + right) * 0.5 + Math.abs(left - right) * 0.22;
-  const drive = constrain(raw * 0.031, 0, 1.35);
+  const raw =
+    (left + right) * 0.5 + Math.abs(left - right) * 0.3 + wingSpd * 0.024 + open * 0.22;
+  const drive = constrain(raw * 0.038, 0, 1.5);
 
-  const kUp = 0.26;
-  const kDn = 0.055;
+  const kUp = 0.28;
+  const kDn = 0.05;
   wingWind.env += (drive - wingWind.env) * (drive > wingWind.env ? kUp : kDn);
 
   const delta = max(0, drive - wingWind.prevDrive);
-  wingWind.prevDrive = lerp(wingWind.prevDrive, drive, 0.22);
-  const flap = min(1, delta * 3.2);
-  const level = constrain(wingWind.env * 0.68 + flap * 0.52, 0, 1);
+  wingWind.prevDrive = lerp(wingWind.prevDrive, drive, 0.2);
+  const flap = min(1, delta * 3.6);
+  const sustain = open * 0.26;
+  const level = constrain(wingWind.env * 0.52 + flap * 0.4 + sustain, 0, 1);
 
-  const t = wingWind.ctx.currentTime;
-  const g = level * 0.36;
-  wingWind.gain.gain.setTargetAtTime(g, t, 0.038);
+  const voiceDuck =
+    operaticVoice.enabled && operaticVoice.smoothMix > 0.02
+      ? lerp(1, 0.3, pow(operaticVoice.smoothMix, 0.9))
+      : 1;
+  const bodyLevel = level * 0.14 * voiceDuck;
+  wingWind.gain.gain.setTargetAtTime(bodyLevel, t, 0.034);
 
-  const lpFloor = lerp(340, 1950, dayEase);
-  const lpMotion = level * lerp(520, 3400, dayEase);
+  const lpFloor = lerp(280, 2100, dayEase) + open * lerp(80, 420, dayEase);
+  const lpMotion = level * lerp(620, 3800, dayEase);
   const lpTarget = lpFloor + lpMotion;
-  wingWind.lp.frequency.setTargetAtTime(lpTarget, t, 0.055);
+  wingWind.lp.frequency.setTargetAtTime(lpTarget, t, 0.05);
 
   if (wingWind.hp) {
-    const hpTarget = lerp(72, 340, dayEase);
-    wingWind.hp.frequency.setTargetAtTime(hpTarget, t, 0.07);
-    wingWind.hp.Q.value = lerp(0.52, 0.78, dayEase);
+    const hpTarget = lerp(58, 380, dayEase) + open * 40;
+    wingWind.hp.frequency.setTargetAtTime(hpTarget, t, 0.065);
+    wingWind.hp.Q.value = lerp(0.5, 0.82, dayEase);
+  }
+
+  if (wingWind.gustGain && wingWind.gustLp) {
+    const gustLevel = constrain(flap * 0.55 + drive * 0.2 + open * 0.1, 0, 1);
+    wingWind.gustGain.gain.setTargetAtTime(gustLevel * 0.1 * voiceDuck, t, 0.022);
+    const gustLpTarget = lerp(2200, 7800, gustLevel) + open * 600;
+    wingWind.gustLp.frequency.setTargetAtTime(gustLpTarget, t, 0.028);
+    if (wingWind.gustHp) {
+      wingWind.gustHp.frequency.setTargetAtTime(lerp(320, 920, gustLevel), t, 0.04);
+    }
+  }
+
+  if (wingWind.panner) {
+    const peak = max(max(left, right), 1);
+    const panTarget = constrain(((left - right) / peak) * 0.62, -0.8, 0.8);
+    wingWind.smoothPan = lerp(wingWind.smoothPan, panTarget, 0.14);
+    wingWind.panner.pan.setTargetAtTime(wingWind.smoothPan, t, 0.06);
   }
 }
 
@@ -430,17 +853,135 @@ function smoothFaceEagleSlot(prev, next, kPos, kSpan) {
   };
 }
 
-function drawInputCover() {
-  const { dw, dh, ox, oy } = videoCoverLayout();
+function feedPortalRadius(dw, dh) {
+  return min(dw, dh) * 0.032;
+}
+
+function feedPortalRoundRectPath(x, y, w, h, radius) {
+  const r = min(radius, w * 0.5, h * 0.5);
+  const ctx = drawingContext;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawFeedPortalBackdrop(ox, oy, dw, dh) {
+  noStroke();
+  fill(6, 8, 14);
+  rect(0, 0, width, max(0, oy));
+  rect(0, oy + dh, width, max(0, height - oy - dh));
+  rect(0, oy, max(0, ox), dh);
+  rect(ox + dw, oy, max(0, width - ox - dw), dh);
+
+  const cx = ox + dw * 0.5;
+  const cy = oy + dh * 0.5;
+  const vig = max(width, height) * 0.72;
+  const ctx = drawingContext;
+  const g = ctx.createRadialGradient(cx, cy, vig * 0.08, cx, cy, vig);
+  g.addColorStop(0, "rgba(18, 22, 32, 0)");
+  g.addColorStop(0.55, "rgba(10, 12, 20, 0.35)");
+  g.addColorStop(1, "rgba(4, 5, 10, 0.92)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function drawFeedPortalImage(ox, oy, dw, dh) {
+  const r = feedPortalRadius(dw, dh);
+  push();
+  feedPortalRoundRectPath(ox, oy, dw, dh, r);
+  drawingContext.clip();
   if (inputMode === "image" && refImg && refImg.width > 0) {
+    tint(255, 245, 228, 242);
     image(refImg, ox, oy, dw, dh);
   } else {
     push();
+    tint(255, 245, 228, 242);
     translate(ox + dw, oy);
     scale(-1, 1);
     image(capture, 0, 0, dw, dh);
     pop();
   }
+  noTint();
+  blendMode(MULTIPLY);
+  noStroke();
+  fill(42, 28, 18, 52);
+  rect(ox, oy, dw, dh);
+  blendMode(SOFT_LIGHT);
+  fill(218, 178, 118, 28);
+  rect(ox, oy, dw, dh);
+  blendMode(BLEND);
+  pop();
+}
+
+function drawFeedPortalFrame(ox, oy, dw, dh, aura) {
+  const r = feedPortalRadius(dw, dh);
+  const pulse = 0.5 + sin(frameCount * 0.028) * 0.14 + aura * 0.55;
+  noFill();
+  for (let i = 5; i >= 0; i--) {
+    const a = (22 + aura * 55) * pulse / (i + 1.2);
+    stroke(218, 178, 118, a);
+    strokeWeight(1.5 + i * 2.8 + aura * 7);
+    feedPortalRoundRectPath(ox - i * 5, oy - i * 5, dw + i * 10, dh + i * 10, r + i * 7);
+    drawingContext.stroke();
+  }
+  stroke(248, 228, 195, 95 + aura * 140);
+  strokeWeight(1.1 + aura * 2.2);
+  feedPortalRoundRectPath(ox, oy, dw, dh, r);
+  drawingContext.stroke();
+  stroke(85, 62, 42, 70 + aura * 50);
+  strokeWeight(0.6);
+  feedPortalRoundRectPath(ox + 2, oy + 2, dw - 4, dh - 4, max(2, r - 2));
+  drawingContext.stroke();
+}
+
+/** Luminous tether from torso to the live feed portal (wings “plug in” to the frame). */
+function drawFeedPortalLinks(lm, aura) {
+  const Pc = torsoCenterProj(lm);
+  if (!Pc) return;
+  const { ox, oy, dw, dh } = videoCoverLayout();
+  const g = constrain(aura, 0, 1);
+  const anchors = [
+    { x: ox, y: oy + dh * 0.38 },
+    { x: ox + dw, y: oy + dh * 0.38 },
+    { x: ox + dw * 0.5, y: oy },
+  ];
+
+  const ctx = drawingContext;
+  ctx.save();
+  ctx.setLineDash([5 + g * 4, 9 + g * 3]);
+  ctx.lineDashOffset = -frameCount * (0.65 + g * 1.1);
+
+  for (let i = 0; i < anchors.length; i++) {
+    const A = anchors[i];
+    const mx = (Pc.x + A.x) * 0.5;
+    const my = (Pc.y + A.y) * 0.5 - swayOffset(i);
+    const sway = sin(frameCount * 0.035 + i * 1.7) * (12 + g * 22);
+    stroke(160, 78, 38, 35 + g * 95);
+    strokeWeight(0.7 + g * 1.6);
+    noFill();
+    bezier(Pc.x, Pc.y, mx + sway, my, mx - sway * 0.6, my, A.x, A.y);
+    stroke(248, 228, 195, 18 + g * 42);
+    strokeWeight(0.45 + g * 0.5);
+    bezier(Pc.x, Pc.y, mx, my + 8, mx, my - 8, A.x, A.y);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  function swayOffset(idx) {
+    return idx === 2 ? 18 : 0;
+  }
+}
+
+function drawInputCover(aura = 0) {
+  const { dw, dh, ox, oy } = videoCoverLayout();
+  const a = constrain(aura, 0, 1.2);
+  drawFeedPortalBackdrop(ox, oy, dw, dh);
+  drawFeedPortalImage(ox, oy, dw, dh);
+  drawFeedPortalFrame(ox, oy, dw, dh, a);
 }
 
 function poseSourceElt() {
@@ -511,6 +1052,65 @@ function handSpreadNormalized(lm, isRight) {
   const denom = max(forearm * 0.4, 26);
   const raw = spreadPx / denom;
   return constrain((raw - 0.2) / 0.58, 0, 1.45);
+}
+
+/** True when left and right hand landmarks are close (palms/fingers touching). */
+function handsTouchingEachOther(lm) {
+  if (!lm) return false;
+  const sw = shoulderWidthPx(lm);
+  const threshold = max(sw * 0.36, 28);
+  const leftPts = [];
+  const rightPts = [];
+  for (const i of HAND_LEFT_POINTS) {
+    if (visibleEnough(lm[i], 0.14)) leftPts.push(project(lm[i]));
+  }
+  for (const i of HAND_RIGHT_POINTS) {
+    if (visibleEnough(lm[i], 0.14)) rightPts.push(project(lm[i]));
+  }
+  if (leftPts.length === 0 || rightPts.length === 0) return false;
+  let minDist = Infinity;
+  for (const a of leftPts) {
+    for (const b of rightPts) {
+      minDist = min(minDist, Math.hypot(b.x - a.x, b.y - a.y));
+    }
+  }
+  return minDist < threshold;
+}
+
+/**
+ * 0 = hands low (near hips), 1 = hands high (above shoulders). Screen Y: up = smaller y.
+ */
+function handsHeightNormalized(lm) {
+  if (!lm) return null;
+  const sw = shoulderWidthPx(lm);
+  let handY = 0;
+  let n = 0;
+  for (const i of HAND_LEFT_POINTS.concat(HAND_RIGHT_POINTS)) {
+    if (visibleEnough(lm[i], 0.12)) {
+      handY += project(lm[i]).y;
+      n++;
+    }
+  }
+  if (n === 0) return null;
+  handY /= n;
+
+  let shY = height * 0.42;
+  if (visibleEnough(lm[11], 0.12) && visibleEnough(lm[12], 0.12)) {
+    const p11 = project(lm[11]);
+    const p12 = project(lm[12]);
+    shY = (p11.y + p12.y) * 0.5;
+  }
+
+  let lowY = shY + sw * 1.15;
+  if (visibleEnough(lm[23], 0.12) && visibleEnough(lm[24], 0.12)) {
+    const p23 = project(lm[23]);
+    const p24 = project(lm[24]);
+    lowY = max(lowY, (p23.y + p24.y) * 0.5);
+  }
+
+  const highY = shY - sw * 1.4;
+  const span = max(lowY - highY, sw * 0.55);
+  return constrain((lowY - handY) / span, 0, 1);
 }
 
 function updateSmoothHandSpread(lm) {
@@ -1998,8 +2598,17 @@ function drawModeHint() {
   textAlign(LEFT, BOTTOM);
   textSize(12);
   const src = inputMode === "image" ? "reference still" : "webcam";
-  const snd = wingWind.enabled ? "wind on" : "wind off";
-  text(`Source: ${src}  ·  I = image  ·  V = video  ·  Space = ${snd}`, 14, height - 14);
+  const snd = wingWind.manualOff
+    ? "wind off"
+    : wingWind.enabled
+      ? "wind on"
+      : "wind (click / move)";
+  const voc = operaticVoice.enabled ? "voice on" : "voice off";
+  text(
+    `Source: ${src}  ·  I = image  ·  V = video  ·  Space = ${snd}  ·  O = ${voc}`,
+    14,
+    height - 14
+  );
   fill(255, 255, 255, 115);
   textSize(11);
   text("Wingspan — move with me", 14, height - 30);
@@ -2026,8 +2635,6 @@ function draw() {
     return;
   }
 
-  drawInputCover();
-
   const now = performance.now();
   const source = poseSourceElt();
 
@@ -2053,6 +2660,11 @@ function draw() {
   const faceResult = cachedFaceResult;
   const result = cachedPoseResult;
   const lm = result && result.landmarks && result.landmarks[0];
+
+  const feedAuraTarget =
+    smoothSpeedGlow + (lm ? 0 : 0.12 + sin(frameCount * 0.02) * 0.08);
+  smoothFeedAura = lerp(smoothFeedAura, feedAuraTarget, lm ? 0.14 : 0.06);
+  drawInputCover(smoothFeedAura);
   let motionForSound = SILENT_ARM_MOTION;
   if (lm) {
     const motion = smoothMotionBundle(armMotionBundle(lm));
@@ -2086,9 +2698,29 @@ function draw() {
     updateSmoothHandSpread(null);
   }
 
+  if (lm) {
+    drawFeedPortalLinks(lm, smoothFeedAura);
+  }
+
   drawEagleEyes(lm, faceResult);
 
-  updateWingWindSound(motionForSound);
+  const hasBody = !!lm;
+  const poseSound = {
+    wingExpand: smoothWingPlumage.expand,
+    wingRest: smoothWingPlumage.rest,
+    leftExpand: smoothPlumage.left.expand,
+    rightExpand: smoothPlumage.right.expand,
+    wingSpeed: smoothWingReact.speed,
+    handsTouching: hasBody ? handsTouchingEachOther(lm) : false,
+    handHeight: hasBody ? handsHeightNormalized(lm) : null,
+  };
+  if (hasBody) {
+    maybeAutoEnableWingWind(motionForSound, poseSound);
+  } else {
+    maybeAutoEnableSoftWind();
+  }
+  updateOperaticVoiceSound(motionForSound, poseSound, hasBody);
+  updateWingWindSound(motionForSound, poseSound, hasBody);
   drawModeHint();
 }
 
