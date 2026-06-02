@@ -138,4 +138,18 @@ Models and WASM are fetched from Google’s model bucket and jsDelivr (`@mediapi
 
 ## Repository
 
-**Wingspan** — source: [github.com/marlonbarrios/spread_your_wings](https://github.com/marlonbarrios/spread_your_wings)
+**Wingspan** — [github.com/marlonbarrios/spread_your_wings](https://github.com/marlonbarrios/spread_your_wings)
+
+### Sync your copy to GitHub
+
+If you developed locally and GitHub still shows the older README (Space only, 5 commits), push the latest `main`:
+
+```bash
+git push origin main
+```
+
+Or use the helper (GitHub [personal access token](https://github.com/settings/tokens) with `repo` scope):
+
+```bash
+./push.sh YOUR_TOKEN
+```
