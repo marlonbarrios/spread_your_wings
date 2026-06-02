@@ -1,6 +1,8 @@
 # Push to GitHub (one-time setup)
 
-Your Mac already has **2 commits** ready. GitHub just needs authentication.
+Your Mac has commits ready to push; GitHub just needs authentication.
+
+If `git push` times out on port 22, use **HTTPS + token** (below) or SSH over port 443 (`HostName ssh.github.com`, `Port 443` in `~/.ssh/config`).
 
 ## Step 1 — Add SSH key to GitHub
 
