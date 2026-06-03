@@ -74,8 +74,10 @@ let operaticVoice = {
   smoothHz: 196,
   /** 0–1 mix level for ducking wind when voice sings. */
   smoothMix: 0,
-  /** 0–1 smoothed: hands together → voice silent. */
+  /** 0–1 smoothed: hands together → timbral modulations. */
   smoothTouch: 0,
+  /** 0–1 smoothed: arms + hands tucked near body → silence. */
+  smoothRestMute: 0,
   /** 0 = hands low, 1 = hands high → pitch. */
   smoothHandHeight: 0.5,
 };
@@ -387,6 +389,7 @@ function toggleOperaticVoiceSound() {
     operaticVoice.prevDrive = 0;
     operaticVoice.smoothMix = 0;
     operaticVoice.smoothTouch = 0;
+    operaticVoice.smoothRestMute = 0;
     operaticVoice.smoothHandHeight = 0.5;
   }
 }
@@ -511,15 +514,22 @@ function updateOperaticVoiceSound(motion, pose, hasBody) {
   const leftExp = pose?.leftExpand ?? 0.55;
   const rightExp = pose?.rightExpand ?? 0.55;
   const wingSpd = pose?.wingSpeed ?? 0;
-  const touchTarget = pose?.handsTouching ? 1 : 0;
-  const kTouchUp = 0.24;
-  const kTouchDn = 0.09;
+  const touchAmt = constrain(pose?.handsTouchAmount ?? 0, 0, 1);
   operaticVoice.smoothTouch = lerp(
     operaticVoice.smoothTouch,
-    touchTarget,
-    touchTarget > operaticVoice.smoothTouch ? kTouchUp : kTouchDn
+    touchAmt,
+    touchAmt > operaticVoice.smoothTouch ? 0.26 : 0.1
   );
-  const voiceGate = 1 - pow(constrain(operaticVoice.smoothTouch, 0, 1), 0.82);
+  const restTarget = constrain(pose?.armsRestMute ?? 0, 0, 1);
+  operaticVoice.smoothRestMute = lerp(
+    operaticVoice.smoothRestMute,
+    restTarget,
+    restTarget > operaticVoice.smoothRestMute ? 0.34 : 0.1
+  );
+  const touch = operaticVoice.smoothTouch;
+  const restMute = operaticVoice.smoothRestMute;
+  const restGate = pow(constrain(1 - restMute, 0, 1), 3.4);
+  const touchPhase = frameCount * 0.096;
 
   const left = motion?.left?.speed ?? 0;
   const right = motion?.right?.speed ?? 0;
@@ -557,40 +567,65 @@ function updateOperaticVoiceSound(motion, pose, hasBody) {
     drive > 0.04 || abs(handHTarget - handHPrev) > 0.018 ? 0.14 : 0.07;
   operaticVoice.smoothHz = lerp(operaticVoice.smoothHz, hz, kPitch);
 
+  const pitchWobble =
+    touch *
+    (sin(touchPhase * 2.15) * 0.11 + sin(touchPhase * 5.2) * 0.06 + sin(touchPhase * 0.85) * 0.04);
+  const hzPlay = operaticVoice.smoothHz * (1 + pitchWobble);
+
   const t = wingWind.ctx.currentTime;
-  operaticVoice.fund.frequency.setTargetAtTime(operaticVoice.smoothHz, t, 0.06);
-  operaticVoice.overtone.frequency.setTargetAtTime(operaticVoice.smoothHz * 2, t, 0.06);
+  operaticVoice.fund.frequency.setTargetAtTime(hzPlay, t, touch > 0.08 ? 0.03 : 0.06);
+  const harmShift = 1 + touch * (0.03 + sin(touchPhase * 3.4) * 0.05);
+  operaticVoice.overtone.frequency.setTargetAtTime(hzPlay * 2 * harmShift, t, 0.05);
 
   if (operaticVoice.vibratoGain) {
-    const vibDepth = lerp(2.5, 16, pow(open, 0.75));
+    const vibDepth =
+      lerp(2.5, 16, pow(open, 0.75)) + touch * (11 + sin(touchPhase * 4.1) * 7);
     operaticVoice.vibratoGain.gain.setTargetAtTime(vibDepth, t, 0.09);
   }
   if (operaticVoice.vibratoOsc) {
-    operaticVoice.vibratoOsc.frequency.setTargetAtTime(lerp(4.4, 7.4, drive), t, 0.1);
+    const vibRate = lerp(4.4, 7.4, drive) + touch * (3.5 + sin(touchPhase * 1.5) * 2.5);
+    operaticVoice.vibratoOsc.frequency.setTargetAtTime(vibRate, t, 0.1);
   }
 
   const bright = constrain(aria * 0.55 + drive * 0.65 + flap * 0.35, 0, 1);
+  if (operaticVoice.harmGain) {
+    const hGain = 0.28 + bright * 0.08 + touch * (0.14 + sin(touchPhase * 2.6) * 0.08);
+    operaticVoice.harmGain.gain.setTargetAtTime(hGain, t, 0.06);
+  }
   const fm = operaticVoice.formants;
   if (fm) {
-    fm[0].bp.frequency.setTargetAtTime(lerp(680, 920, bright), t, 0.07);
-    fm[1].bp.frequency.setTargetAtTime(lerp(1080, 1480, bright), t, 0.07);
-    fm[2].bp.frequency.setTargetAtTime(lerp(2550, 3350, bright), t, 0.08);
-    fm[0].bp.Q.setTargetAtTime(lerp(9, 13, bright), t, 0.1);
+    const fWob = 1 + touch * sin(touchPhase * 2.6) * 0.14;
+    fm[0].bp.frequency.setTargetAtTime(lerp(680, 920, bright) * fWob, t, 0.07);
+    fm[1].bp.frequency.setTargetAtTime(
+      lerp(1080, 1480, bright) * (1 + touch * sin(touchPhase * 3.8 + 0.8) * 0.1),
+      t,
+      0.07
+    );
+    fm[2].bp.frequency.setTargetAtTime(
+      lerp(2550, 3350, bright) * (1 + touch * sin(touchPhase * 5.0) * 0.12),
+      t,
+      0.08
+    );
+    fm[0].bp.Q.setTargetAtTime(lerp(9, 13 + touch * 2, bright), t, 0.1);
   }
 
-  const sustain = aria * 0.42;
+  const restDamp = 1 - restMute * 0.97;
+  const sustain = aria * 0.42 * restDamp;
   const level = constrain(
-    (operaticVoice.env * 0.68 + sustain + flap * 0.5) * voiceGate,
+    (operaticVoice.env * 0.68 * restDamp + sustain + flap * 0.5 * restDamp + touch * 0.08) *
+      restGate,
     0,
     1
   );
   operaticVoice.smoothMix = lerp(operaticVoice.smoothMix, level, 0.11);
-  operaticVoice.masterGain.gain.setTargetAtTime(level * 0.44, t, 0.045);
+  const outGain = restMute > 0.68 ? 0 : level * 0.44;
+  operaticVoice.masterGain.gain.setTargetAtTime(outGain, t, restMute > 0.5 ? 0.028 : 0.045);
 
   if (operaticVoice.panner) {
     const peak = max(max(left, right), 1);
-    const pan = constrain(((left - right) / peak) * 0.55, -0.72, 0.72);
-    operaticVoice.panner.pan.setTargetAtTime(pan, t, 0.07);
+    let pan = constrain(((left - right) / peak) * 0.55, -0.72, 0.72);
+    pan += touch * sin(touchPhase * 2.35) * 0.34;
+    operaticVoice.panner.pan.setTargetAtTime(constrain(pan, -0.85, 0.85), t, 0.07);
   }
 }
 
@@ -1054,11 +1089,11 @@ function handSpreadNormalized(lm, isRight) {
   return constrain((raw - 0.2) / 0.58, 0, 1.45);
 }
 
-/** True when left and right hand landmarks are close (palms/fingers touching). */
-function handsTouchingEachOther(lm) {
-  if (!lm) return false;
+/** 0–1 how close left and right hands are (1 = touching). */
+function handsTouchAmount(lm) {
+  if (!lm) return 0;
   const sw = shoulderWidthPx(lm);
-  const threshold = max(sw * 0.36, 28);
+  const threshold = max(sw * 0.38, 30);
   const leftPts = [];
   const rightPts = [];
   for (const i of HAND_LEFT_POINTS) {
@@ -1067,14 +1102,91 @@ function handsTouchingEachOther(lm) {
   for (const i of HAND_RIGHT_POINTS) {
     if (visibleEnough(lm[i], 0.14)) rightPts.push(project(lm[i]));
   }
-  if (leftPts.length === 0 || rightPts.length === 0) return false;
+  if (leftPts.length === 0 || rightPts.length === 0) return 0;
   let minDist = Infinity;
   for (const a of leftPts) {
     for (const b of rightPts) {
       minDist = min(minDist, Math.hypot(b.x - a.x, b.y - a.y));
     }
   }
-  return minDist < threshold;
+  return pow(constrain(1 - minDist / threshold, 0, 1), 0.62);
+}
+
+function handsTouchingEachOther(lm) {
+  return handsTouchAmount(lm) > 0.42;
+}
+
+/** 0–1 mean hand landmarks near torso center. */
+function handsNearTorsoAmount(lm) {
+  const Pc = torsoCenterProj(lm);
+  if (!Pc) return 0;
+  const sw = shoulderWidthPx(lm) || 80;
+  const pts = [];
+  for (const i of HAND_LEFT_POINTS.concat(HAND_RIGHT_POINTS)) {
+    if (visibleEnough(lm[i], 0.12)) pts.push(project(lm[i]));
+  }
+  if (pts.length === 0) return 0;
+  let meanD = 0;
+  for (const p of pts) meanD += Math.hypot(p.x - Pc.x, p.y - Pc.y);
+  meanD /= pts.length;
+  const near = sw * 0.48;
+  const far = sw * 0.98;
+  return pow(constrain(1 - (meanD - near) / (far - near), 0, 1), 0.85);
+}
+
+/** 0–1 wrists/elbows tucked + wings folded (arms near body). */
+function armsNearTorsoAmount(lm, plL, plR) {
+  const Pc = torsoCenterProj(lm);
+  if (!Pc) return 0;
+  const sw = shoulderWidthPx(lm) || 80;
+  let geom = 0;
+  let n = 0;
+  let wristLow = 0;
+  let nw = 0;
+  for (const [wr, el] of [
+    [15, 13],
+    [16, 14],
+  ]) {
+    if (visibleEnough(lm[wr], 0.12)) {
+      const p = project(lm[wr]);
+      geom += constrain(1 - (Math.hypot(p.x - Pc.x, p.y - Pc.y) - sw * 0.22) / (sw * 0.62), 0, 1);
+      n++;
+      let hipY = Pc.y + sw * 0.55;
+      if (visibleEnough(lm[23], 0.12) && visibleEnough(lm[24], 0.12)) {
+        hipY = (project(lm[23]).y + project(lm[24]).y) * 0.5;
+      }
+      let shY = Pc.y - sw * 0.35;
+      if (visibleEnough(lm[11], 0.12) && visibleEnough(lm[12], 0.12)) {
+        shY = (project(lm[11]).y + project(lm[12]).y) * 0.5;
+      }
+      wristLow += constrain((p.y - shY) / max(hipY - shY, sw * 0.45), 0, 1);
+      nw++;
+    }
+    if (visibleEnough(lm[el], 0.12)) {
+      const p = project(lm[el]);
+      geom += constrain(1 - (Math.hypot(p.x - Pc.x, p.y - Pc.y) - sw * 0.16) / (sw * 0.58), 0, 1);
+      n++;
+    }
+  }
+  geom = n ? geom / n : 0;
+  wristLow = nw ? wristLow / nw : 0;
+  const expand = ((plL?.expand ?? 0.55) + (plR?.expand ?? 0.55)) * 0.5;
+  const closed = constrain(1 - expand, 0, 1);
+  const rest = ((plL?.rest ?? 0.45) + (plR?.rest ?? 0.45)) * 0.5;
+  return constrain(geom * 0.45 + closed * 0.22 + rest * 0.18 + wristLow * 0.38, 0, 1);
+}
+
+/** 0–1 silence: arms down & tucked, hands near hips; touching hands → modulate. */
+function voiceRestMuteAmount(lm, plL, plR) {
+  if (handsTouchAmount(lm) > 0.38) return 0;
+
+  const arms = armsNearTorsoAmount(lm, plL, plR);
+  const hands = handsNearTorsoAmount(lm);
+  const handH = handsHeightNormalized(lm);
+  const handLow = handH !== null ? pow(constrain(1 - handH / 0.48, 0, 1), 0.9) : 0.55;
+
+  const tucked = arms * max(hands, handLow * 0.82) * (0.42 + handLow * 0.58);
+  return constrain(pow(tucked, 0.7), 0, 1);
 }
 
 /**
@@ -2705,13 +2817,18 @@ function draw() {
   drawEagleEyes(lm, faceResult);
 
   const hasBody = !!lm;
+  const touchAmt = hasBody ? handsTouchAmount(lm) : 0;
   const poseSound = {
     wingExpand: smoothWingPlumage.expand,
     wingRest: smoothWingPlumage.rest,
     leftExpand: smoothPlumage.left.expand,
     rightExpand: smoothPlumage.right.expand,
     wingSpeed: smoothWingReact.speed,
-    handsTouching: hasBody ? handsTouchingEachOther(lm) : false,
+    handsTouching: touchAmt > 0.42,
+    handsTouchAmount: touchAmt,
+    armsRestMute: hasBody
+      ? voiceRestMuteAmount(lm, smoothPlumage.left, smoothPlumage.right)
+      : 0,
     handHeight: hasBody ? handsHeightNormalized(lm) : null,
   };
   if (hasBody) {
