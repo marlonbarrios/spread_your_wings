@@ -57,7 +57,10 @@ let wingWind = {
 
 let audioUnlocked = false;
 
-/** O toggles operatic voice (formant synth), driven by arms + wing spread. */
+/** O toggles all sound (wind + operatic voice). */
+let soundOn = true;
+
+/** Operatic voice (formant synth), driven by arms + wing spread when sound is on. */
 let operaticVoice = {
   enabled: false,
   graphReady: false,
@@ -209,7 +212,8 @@ function keyPressed() {
     lastFaceDetectMs = -Infinity;
   }
   if (key === "o" || key === "O") {
-    toggleOperaticVoiceSound();
+    toggleSound();
+    return false;
   }
 }
 
@@ -334,13 +338,13 @@ function ensureWingWindEnabled() {
 
 /** No pose: gentle ambient wind only (after audio unlock). */
 function maybeAutoEnableSoftWind() {
-  if (!audioUnlocked || wingWind.manualOff) return;
+  if (!soundOn || !audioUnlocked || wingWind.manualOff) return;
   ensureWingWindEnabled();
 }
 
 /** Body visible: start wind when arms move (after click/key unlock). */
 function maybeAutoEnableWingWind(motion, pose) {
-  if (!audioUnlocked || wingWind.manualOff) return;
+  if (!soundOn || !audioUnlocked || wingWind.manualOff) return;
 
   const left = motion?.left?.speed ?? 0;
   const right = motion?.right?.speed ?? 0;
@@ -366,21 +370,8 @@ function clockDayPitchPhase() {
   return (h - dayStart) / (dayEnd - dayStart);
 }
 
-function toggleOperaticVoiceSound() {
-  operaticVoice.enabled = !operaticVoice.enabled;
-  if (operaticVoice.enabled) {
-    if (!ensureSharedAudioContext()) {
-      operaticVoice.enabled = false;
-      return;
-    }
-    ensureOperaticVoiceGraph();
-    if (!operaticVoice.graphReady) {
-      operaticVoice.enabled = false;
-      return;
-    }
-    if (wingWind.ctx && wingWind.ctx.state === "suspended") wingWind.ctx.resume();
-    operaticVoice.smoothHz = 196;
-  } else if (operaticVoice.masterGain && wingWind.ctx) {
+function disableOperaticVoiceOutput() {
+  if (operaticVoice.masterGain && wingWind.ctx) {
     const t = wingWind.ctx.currentTime;
     operaticVoice.masterGain.gain.cancelScheduledValues(t);
     operaticVoice.masterGain.gain.setValueAtTime(operaticVoice.masterGain.gain.value, t);
@@ -391,6 +382,51 @@ function toggleOperaticVoiceSound() {
     operaticVoice.smoothTouch = 0;
     operaticVoice.smoothRestMute = 0;
     operaticVoice.smoothHandHeight = 0.5;
+  }
+}
+
+function enableOperaticVoiceSound() {
+  if (!ensureSharedAudioContext()) return false;
+  ensureOperaticVoiceGraph();
+  if (!operaticVoice.graphReady) return false;
+  operaticVoice.enabled = true;
+  if (wingWind.ctx && wingWind.ctx.state === "suspended") wingWind.ctx.resume();
+  operaticVoice.smoothHz = 196;
+  return true;
+}
+
+function toggleSound() {
+  soundOn = !soundOn;
+  if (!soundOn) {
+    wingWind.enabled = false;
+    wingWind.manualOff = true;
+    operaticVoice.enabled = false;
+    disableWingWindOutput();
+    disableOperaticVoiceOutput();
+    return;
+  }
+  wingWind.manualOff = false;
+  if (!ensureSharedAudioContext()) {
+    soundOn = false;
+    return;
+  }
+  ensureWingWindEnabled();
+  enableOperaticVoiceSound();
+}
+
+function disableWingWindOutput() {
+  if (wingWind.gain && wingWind.ctx) {
+    const t = wingWind.ctx.currentTime;
+    wingWind.gain.gain.cancelScheduledValues(t);
+    wingWind.gain.gain.setValueAtTime(wingWind.gain.gain.value, t);
+    wingWind.gain.gain.setTargetAtTime(0, t, 0.035);
+    if (wingWind.gustGain) {
+      wingWind.gustGain.gain.cancelScheduledValues(t);
+      wingWind.gustGain.gain.setValueAtTime(wingWind.gustGain.gain.value, t);
+      wingWind.gustGain.gain.setTargetAtTime(0, t, 0.03);
+    }
+    wingWind.env = 0;
+    wingWind.prevDrive = 0;
   }
 }
 
@@ -492,6 +528,7 @@ function ensureOperaticVoiceGraph() {
  */
 function updateOperaticVoiceSound(motion, pose, hasBody) {
   if (
+    !soundOn ||
     !operaticVoice.enabled ||
     !operaticVoice.graphReady ||
     !wingWind.ctx ||
@@ -630,6 +667,7 @@ function updateOperaticVoiceSound(motion, pose, hasBody) {
 }
 
 function toggleWingWindSound() {
+  if (!soundOn) return;
   wingWind.enabled = !wingWind.enabled;
   wingWind.manualOff = !wingWind.enabled;
   if (wingWind.enabled) {
@@ -646,18 +684,8 @@ function toggleWingWindSound() {
     }
     if (wingWind.ctx && wingWind.ctx.state === "suspended") wingWind.ctx.resume();
     wingWind.smoothDayPitch = clockDayPitchPhase();
-  } else if (wingWind.gain && wingWind.ctx) {
-    const t = wingWind.ctx.currentTime;
-    wingWind.gain.gain.cancelScheduledValues(t);
-    wingWind.gain.gain.setValueAtTime(wingWind.gain.gain.value, t);
-    wingWind.gain.gain.setTargetAtTime(0, t, 0.035);
-    if (wingWind.gustGain) {
-      wingWind.gustGain.gain.cancelScheduledValues(t);
-      wingWind.gustGain.gain.setValueAtTime(wingWind.gustGain.gain.value, t);
-      wingWind.gustGain.gain.setTargetAtTime(0, t, 0.03);
-    }
-    wingWind.env = 0;
-    wingWind.prevDrive = 0;
+  } else {
+    disableWingWindOutput();
   }
 }
 
@@ -666,7 +694,14 @@ function toggleWingWindSound() {
  * Time of day slowly brightens the wind from morning to evening.
  */
 function updateWingWindSound(motion, pose, hasBody) {
-  if (!wingWind.enabled || !wingWind.graphReady || !wingWind.ctx || !wingWind.gain || !wingWind.lp)
+  if (
+    !soundOn ||
+    !wingWind.enabled ||
+    !wingWind.graphReady ||
+    !wingWind.ctx ||
+    !wingWind.gain ||
+    !wingWind.lp
+  )
     return;
   if (wingWind.ctx.state === "suspended") wingWind.ctx.resume();
 
@@ -2715,9 +2750,9 @@ function drawModeHint() {
     : wingWind.enabled
       ? "wind on"
       : "wind (click / move)";
-  const voc = operaticVoice.enabled ? "voice on" : "voice off";
+  const all = soundOn ? "sound on" : "sound off";
   text(
-    `Source: ${src}  ·  I = image  ·  V = video  ·  Space = ${snd}  ·  O = ${voc}`,
+    `Source: ${src}  ·  I = image  ·  V = video  ·  Space = ${snd}  ·  O = ${all}`,
     14,
     height - 14
   );
